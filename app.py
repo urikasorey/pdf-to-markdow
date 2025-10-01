@@ -14,6 +14,9 @@ import re
 import cv2
 import numpy as np
 import pandas as pd
+import zipfile
+from datetime import datetime
+import time
 try:
     import pytesseract
     # Streamlit Cloud sẽ cài Tesseract tự động
@@ -21,7 +24,25 @@ try:
 except ImportError:
     TESSERACT_AVAILABLE = False
 
-def detect_table_in_image(image_path):
+def optimize_image(image_path, max_width=1200, quality=85):
+    """Tối ưu hóa kích thước và chất lượng hình ảnh"""
+    try:
+        img = Image.open(image_path)
+        
+        # Resize nếu ảnh quá lớn
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((max_width, new_height), Image.LANCZOS)
+        
+        # Lưu lại với chất lượng tối ưu
+        img.save(image_path, optimize=True, quality=quality)
+        
+        return True
+    except Exception as e:
+        return False
+
+def detect_table_in_image(image_path, language='vie+eng'):
     """Phát hiện và trích xuất bảng từ hình ảnh bằng OCR"""
     if not TESSERACT_AVAILABLE:
         return None
@@ -50,8 +71,8 @@ def detect_table_in_image(image_path):
         
         # Nếu phát hiện đủ nhiều đường => có thể là bảng
         if cv2.countNonZero(table_mask) > 100:
-            # Sử dụng OCR để đọc text
-            ocr_data = pytesseract.image_to_string(img)
+            # Sử dụng OCR để đọc text với ngôn ngữ tiếng Việt + English
+            ocr_data = pytesseract.image_to_string(img, lang=language)
             
             # Thử parse thành bảng
             lines = [line.strip() for line in ocr_data.split('\n') if line.strip()]
@@ -87,7 +108,7 @@ def lines_to_markdown_table(lines):
     
     return markdown_table if markdown_table else None
 
-def extract_images_from_pdf(pdf_path, output_folder):
+def extract_images_from_pdf(pdf_path, output_folder, optimize_imgs=True, enable_ocr=True, ocr_lang='vie+eng'):
     """Trích xuất hình ảnh từ PDF"""
     doc = fitz.open(pdf_path)
     images = []
@@ -109,8 +130,14 @@ def extract_images_from_pdf(pdf_path, output_folder):
             with open(image_path, "wb") as img_file:
                 img_file.write(image_bytes)
             
-            # Thử phát hiện bảng trong ảnh
-            table_data = detect_table_in_image(image_path)
+            # Tối ưu hóa ảnh nếu được bật
+            if optimize_imgs:
+                optimize_image(image_path)
+            
+            # Thử phát hiện bảng trong ảnh nếu OCR được bật
+            table_data = None
+            if enable_ocr:
+                table_data = detect_table_in_image(image_path, ocr_lang)
             
             images.append({
                 'page': page_num,
@@ -123,7 +150,7 @@ def extract_images_from_pdf(pdf_path, output_folder):
     doc.close()
     return images
 
-def pdf_to_markdown(pdf_path, output_folder):
+def pdf_to_markdown(pdf_path, output_folder, image_path_prefix='', optimize_imgs=True, enable_ocr=True, ocr_lang='vie+eng'):
     """Chuyển đổi PDF sang Markdown"""
     doc = fitz.open(pdf_path)
     markdown_content = ""
@@ -132,8 +159,14 @@ def pdf_to_markdown(pdf_path, output_folder):
     os.makedirs(output_folder, exist_ok=True)
     
     # Trích xuất hình ảnh
-    images = extract_images_from_pdf(pdf_path, output_folder)
+    images = extract_images_from_pdf(pdf_path, output_folder, optimize_imgs, enable_ocr, ocr_lang)
     image_index = 0
+    
+    stats = {
+        'pages': len(doc),
+        'images': len(images),
+        'tables': sum(1 for img in images if img.get('is_table', False))
+    }
     
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -163,16 +196,18 @@ def pdf_to_markdown(pdf_path, output_folder):
                 if table_md:
                     markdown_content += f"\n**📊 Bảng (OCR):**\n\n{table_md}\n\n"
                 else:
-                    markdown_content += f"![Image]({img['name']})\n\n"
+                    image_path = f"{image_path_prefix}{img['name']}"
+                    markdown_content += f"![Image]({image_path})\n\n"
             else:
-                markdown_content += f"![Image]({img['name']})\n\n"
+                image_path = f"{image_path_prefix}{img['name']}"
+                markdown_content += f"![Image]({image_path})\n\n"
         
         # Phân cách trang
         if page_num < len(doc) - 1:
             markdown_content += "\n---\n\n"
     
     doc.close()
-    return markdown_content
+    return markdown_content, stats
 
 def extract_images_from_docx(docx_path, output_folder):
     """Trích xuất hình ảnh từ Word"""
@@ -199,7 +234,7 @@ def extract_images_from_docx(docx_path, output_folder):
     
     return images
 
-def docx_to_markdown(docx_path, output_folder):
+def docx_to_markdown(docx_path, output_folder, image_path_prefix=''):
     """Chuyển đổi Word sang Markdown"""
     doc = Document(docx_path)
     markdown_content = ""
@@ -210,6 +245,12 @@ def docx_to_markdown(docx_path, output_folder):
     # Trích xuất hình ảnh
     images = extract_images_from_docx(docx_path, output_folder)
     image_index = 0
+    
+    stats = {
+        'paragraphs': len(doc.paragraphs),
+        'images': len(images),
+        'tables': len(doc.tables)
+    }
     
     for element in doc.element.body:
         if isinstance(element, CT_P):
@@ -247,7 +288,8 @@ def docx_to_markdown(docx_path, output_folder):
             # Kiểm tra xem paragraph có chứa hình ảnh không
             if paragraph._element.xpath('.//pic:pic'):
                 if image_index < len(images):
-                    markdown_content += f"![Image]({images[image_index]['name']})\n\n"
+                    image_path = f"{image_path_prefix}{images[image_index]['name']}"
+                    markdown_content += f"![Image]({image_path})\n\n"
                     image_index += 1
         
         elif isinstance(element, CT_Tbl):
@@ -266,7 +308,25 @@ def docx_to_markdown(docx_path, output_folder):
             
             markdown_content += "\n"
     
-    return markdown_content
+    return markdown_content, stats
+
+def create_zip_file(markdown_content, images_dir, md_filename):
+    """Tạo file ZIP chứa markdown và tất cả hình ảnh"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Thêm file markdown
+        zip_file.writestr(md_filename, markdown_content)
+        
+        # Thêm tất cả hình ảnh
+        if os.path.exists(images_dir):
+            for filename in os.listdir(images_dir):
+                file_path = os.path.join(images_dir, filename)
+                if os.path.isfile(file_path):
+                    zip_file.write(file_path, f"images/{filename}")
+    
+    zip_buffer.seek(0)
+    return zip_buffer
 
 def main():
     st.set_page_config(page_title="Chuyển đổi PDF/Word sang Markdown", page_icon="📝", layout="wide")
@@ -276,71 +336,186 @@ def main():
     
     # Hiển thị trạng thái OCR
     if TESSERACT_AVAILABLE:
-        st.success("✅ OCR đã được kích hoạt - Có thể nhận diện bảng từ hình ảnh!")
+        st.success("✅ OCR đã được kích hoạt - Có thể nhận diện bảng từ hình ảnh (Tiếng Việt + English)!")
     else:
         st.warning("⚠️ OCR chưa khả dụng - Bảng sẽ hiển thị dưới dạng hình ảnh")
     
-    # Upload file
-    uploaded_file = st.file_uploader("Chọn file PDF hoặc Word", type=['pdf', 'docx'])
+    # Sidebar - Tùy chọn
+    with st.sidebar:
+        st.header("⚙️ Tùy chọn")
+        
+        st.subheader("📊 OCR Settings")
+        enable_ocr = st.checkbox("Bật OCR nhận diện bảng", value=True, help="Tự động phát hiện và chuyển đổi bảng từ hình ảnh")
+        ocr_language = st.selectbox(
+            "Ngôn ngữ OCR",
+            ["vie+eng", "eng", "vie"],
+            help="vie+eng: Tiếng Việt + English (khuyên dùng)"
+        )
+        
+        st.subheader("🖼️ Hình ảnh")
+        optimize_images = st.checkbox("Tối ưu kích thước ảnh", value=True, help="Giảm kích thước ảnh để file nhẹ hơn")
+        image_path = st.selectbox(
+            "Đường dẫn ảnh trong Markdown",
+            ["", "images/", "./", "./images/"],
+            help="Chọn format đường dẫn ảnh trong file Markdown"
+        )
+        
+        st.subheader("📦 Export")
+        export_format = st.multiselect(
+            "Format xuất file",
+            ["Markdown (.md)", "ZIP (MD + Images)", "HTML"],
+            default=["Markdown (.md)", "ZIP (MD + Images)"]
+        )
     
-    if uploaded_file is not None:
-        # Hiển thị thông tin file
-        st.info(f"📄 File: {uploaded_file.name} ({uploaded_file.size / 1024:.2f} KB)")
-        
-        # Tạo thư mục tạm để xử lý
-        temp_dir = "temp_output"
-        images_dir = os.path.join(temp_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
-        
-        # Lưu file tạm
-        temp_file_path = os.path.join(temp_dir, uploaded_file.name)
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+    # Upload file (có thể nhiều file)
+    uploaded_files = st.file_uploader(
+        "Chọn file PDF hoặc Word", 
+        type=['pdf', 'docx'],
+        accept_multiple_files=True,
+        help="Có thể chọn nhiều file cùng lúc"
+    )
+    
+    if uploaded_files:
+        # Hiển thị thông tin files
+        if len(uploaded_files) == 1:
+            st.info(f"📄 File: {uploaded_files[0].name} ({uploaded_files[0].size / 1024:.2f} KB)")
+        else:
+            st.info(f"📄 Đã chọn {len(uploaded_files)} files - Tổng: {sum(f.size for f in uploaded_files) / 1024:.2f} KB")
         
         # Nút chuyển đổi
         if st.button("🚀 Chuyển đổi sang Markdown", type="primary"):
-            with st.spinner("Đang xử lý..."):
-                try:
-                    # Xác định loại file và xử lý
-                    if uploaded_file.name.endswith('.pdf'):
-                        markdown_content = pdf_to_markdown(temp_file_path, images_dir)
-                    elif uploaded_file.name.endswith('.docx'):
-                        markdown_content = docx_to_markdown(temp_file_path, images_dir)
-                    else:
-                        st.error("Định dạng file không được hỗ trợ!")
-                        return
+            start_time = time.time()
+            
+            all_results = []
+            
+            for uploaded_file in uploaded_files:
+                with st.spinner(f"Đang xử lý {uploaded_file.name}..."):
+                    try:
+                        # Tạo thư mục tạm để xử lý
+                        temp_dir = f"temp_output_{uploaded_file.name.replace('.', '_')}"
+                        images_dir = os.path.join(temp_dir, "images")
+                        os.makedirs(images_dir, exist_ok=True)
+                        
+                        # Lưu file tạm
+                        temp_file_path = os.path.join(temp_dir, uploaded_file.name)
+                        with open(temp_file_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        # Xác định loại file và xử lý
+                        if uploaded_file.name.endswith('.pdf'):
+                            markdown_content, stats = pdf_to_markdown(
+                                temp_file_path, images_dir, image_path, 
+                                optimize_images, enable_ocr, ocr_language
+                            )
+                        elif uploaded_file.name.endswith('.docx'):
+                            markdown_content, stats = docx_to_markdown(temp_file_path, images_dir, image_path)
+                        else:
+                            st.error(f"❌ {uploaded_file.name}: Định dạng không được hỗ trợ!")
+                            continue
+                        
+                        all_results.append({
+                            'filename': uploaded_file.name,
+                            'markdown': markdown_content,
+                            'stats': stats,
+                            'images_dir': images_dir,
+                            'temp_dir': temp_dir
+                        })
+                        
+                    except Exception as e:
+                        st.error(f"❌ Lỗi khi xử lý {uploaded_file.name}: {str(e)}")
+                        continue
+            
+            if all_results:
+                elapsed_time = time.time() - start_time
+                st.success(f"✅ Chuyển đổi thành công {len(all_results)} file(s) trong {elapsed_time:.2f}s!")
+                
+                # Nếu chỉ 1 file, hiển thị chi tiết
+                if len(all_results) == 1:
+                    result = all_results[0]
                     
-                    # Hiển thị kết quả
-                    st.success("✅ Chuyển đổi thành công!")
+                    # Hiển thị thống kê
+                    st.subheader("📊 Thống kê")
+                    stat_cols = st.columns(len(result['stats']))
+                    for idx, (key, value) in enumerate(result['stats'].items()):
+                        with stat_cols[idx]:
+                            st.metric(key.capitalize(), value)
                     
                     # Tạo 2 cột
                     col1, col2 = st.columns(2)
                     
                     with col1:
                         st.subheader("📝 Nội dung Markdown")
-                        st.text_area("Markdown Output", markdown_content, height=400)
+                        st.text_area("Markdown Output", result['markdown'], height=400)
                         
                         # Nút download markdown
-                        st.download_button(
-                            label="💾 Tải xuống Markdown",
-                            data=markdown_content,
-                            file_name=f"{Path(uploaded_file.name).stem}.md",
-                            mime="text/markdown"
-                        )
+                        if "Markdown (.md)" in export_format:
+                            st.download_button(
+                                label="💾 Tải xuống Markdown",
+                                data=result['markdown'],
+                                file_name=f"{Path(result['filename']).stem}.md",
+                                mime="text/markdown"
+                            )
+                    
+                        
+                        # Nút download ZIP
+                        if "ZIP (MD + Images)" in export_format:
+                            zip_file = create_zip_file(
+                                result['markdown'], 
+                                result['images_dir'], 
+                                f"{Path(result['filename']).stem}.md"
+                            )
+                            st.download_button(
+                                label="📦 Tải xuống ZIP (MD + Images)",
+                                data=zip_file,
+                                file_name=f"{Path(result['filename']).stem}.zip",
+                                mime="application/zip"
+                            )
+                        
+                        # HTML Export
+                        if "HTML" in export_format:
+                            html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{Path(result['filename']).stem}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }}
+        img {{ max-width: 100%; height: auto; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; }}
+    </style>
+</head>
+<body>
+{result['markdown']}
+</body>
+</html>
+"""
+                            st.download_button(
+                                label="📄 Tải xuống HTML",
+                                data=html_content,
+                                file_name=f"{Path(result['filename']).stem}.html",
+                                mime="text/html"
+                            )
                     
                     with col2:
                         st.subheader("👁️ Preview Markdown")
                         # Thay thế đường dẫn ảnh để hiển thị trong Streamlit
-                        preview_content = markdown_content
-                        if os.path.exists(images_dir):
-                            image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+                        preview_content = result['markdown']
+                        if os.path.exists(result['images_dir']):
+                            image_files = [f for f in os.listdir(result['images_dir']) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
                             for img_file in image_files:
-                                img_path = os.path.join(images_dir, img_file)
+                                img_path = os.path.join(result['images_dir'], img_file)
                                 # Đọc ảnh và convert sang base64 để hiển thị inline
                                 with open(img_path, "rb") as img_f:
                                     img_data = base64.b64encode(img_f.read()).decode()
                                     img_ext = img_file.split('.')[-1]
                                     # Thay thế đường dẫn ảnh bằng data URI
+                                    preview_content = preview_content.replace(
+                                        f"![Image]({image_path}{img_file})",
+                                        f'<img src="data:image/{img_ext};base64,{img_data}" alt="{img_file}" style="max-width:100%; height:auto;"/>'
+                                    )
                                     preview_content = preview_content.replace(
                                         f"![Image]({img_file})",
                                         f'<img src="data:image/{img_ext};base64,{img_data}" alt="{img_file}" style="max-width:100%; height:auto;"/>'
@@ -348,15 +523,15 @@ def main():
                         st.markdown(preview_content, unsafe_allow_html=True)
                     
                     # Hiển thị hình ảnh đã trích xuất
-                    if os.path.exists(images_dir):
-                        image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+                    if os.path.exists(result['images_dir']):
+                        image_files = [f for f in os.listdir(result['images_dir']) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
                         if image_files:
                             st.subheader(f"🖼️ Hình ảnh đã trích xuất ({len(image_files)} ảnh)")
                             
                             cols = st.columns(3)
                             for idx, img_file in enumerate(image_files):
                                 with cols[idx % 3]:
-                                    img_path = os.path.join(images_dir, img_file)
+                                    img_path = os.path.join(result['images_dir'], img_file)
                                     st.image(img_path, caption=img_file, use_container_width=True)
                                     
                                     # Nút download từng ảnh
@@ -369,9 +544,79 @@ def main():
                                             key=f"download_{img_file}"
                                         )
                 
-                except Exception as e:
-                    st.error(f"❌ Lỗi: {str(e)}")
-                    st.exception(e)
+                # Nếu nhiều file, hiển thị tổng hợp
+                else:
+                    st.subheader("📊 Tổng hợp kết quả")
+                    
+                    for idx, result in enumerate(all_results):
+                        with st.expander(f"📄 {result['filename']}", expanded=False):
+                            # Thống kê
+                            stat_cols = st.columns(len(result['stats']))
+                            for idx_stat, (key, value) in enumerate(result['stats'].items()):
+                                with stat_cols[idx_stat]:
+                                    st.metric(key.capitalize(), value)
+                            
+                            # Download buttons
+                            cols = st.columns(3)
+                            with cols[0]:
+                                if "Markdown (.md)" in export_format:
+                                    st.download_button(
+                                        label="💾 MD",
+                                        data=result['markdown'],
+                                        file_name=f"{Path(result['filename']).stem}.md",
+                                        mime="text/markdown",
+                                        key=f"md_{idx}"
+                                    )
+                            with cols[1]:
+                                if "ZIP (MD + Images)" in export_format:
+                                    zip_file = create_zip_file(
+                                        result['markdown'], 
+                                        result['images_dir'], 
+                                        f"{Path(result['filename']).stem}.md"
+                                    )
+                                    st.download_button(
+                                        label="📦 ZIP",
+                                        data=zip_file,
+                                        file_name=f"{Path(result['filename']).stem}.zip",
+                                        mime="application/zip",
+                                        key=f"zip_{idx}"
+                                    )
+                            with cols[2]:
+                                if "HTML" in export_format:
+                                    html_content = f"<!DOCTYPE html><html><body>{result['markdown']}</body></html>"
+                                    st.download_button(
+                                        label="📄 HTML",
+                                        data=html_content,
+                                        file_name=f"{Path(result['filename']).stem}.html",
+                                        mime="text/html",
+                                        key=f"html_{idx}"
+                                    )
+                    
+                    # Download tất cả thành 1 ZIP lớn
+                    st.subheader("📦 Tải xuống tất cả")
+                    all_zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(all_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for result in all_results:
+                            # Thêm markdown
+                            zip_file.writestr(
+                                f"{Path(result['filename']).stem}/{Path(result['filename']).stem}.md",
+                                result['markdown']
+                            )
+                            # Thêm images
+                            if os.path.exists(result['images_dir']):
+                                for img_file in os.listdir(result['images_dir']):
+                                    img_path = os.path.join(result['images_dir'], img_file)
+                                    zip_file.write(
+                                        img_path,
+                                        f"{Path(result['filename']).stem}/images/{img_file}"
+                                    )
+                    all_zip_buffer.seek(0)
+                    st.download_button(
+                        label="📦 Tải xuống tất cả (ZIP)",
+                        data=all_zip_buffer,
+                        file_name=f"converted_files_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                        mime="application/zip"
+                    )
         
         # Hướng dẫn
         with st.expander("ℹ️ Hướng dẫn sử dụng"):
@@ -385,11 +630,20 @@ def main():
                - Hình ảnh được hiển thị bên dưới
             4. **Tải xuống**: Tải file Markdown và hình ảnh về máy
             
-            ### Tính năng:
+            ### Tính năng MỚI:
+            - ✅ **Upload nhiều file cùng lúc** - Batch processing
+            - ✅ **OCR tiếng Việt + English** - Nhận diện bảng chính xác
+            - ✅ **Tối ưu hình ảnh** - Giảm kích thước file
+            - ✅ **Tải xuống ZIP** - Gộp markdown + images
+            - ✅ **Export HTML** - Xuất sang định dạng HTML
+            - ✅ **Thống kê file** - Số trang, ảnh, bảng
+            - ✅ **Tùy chọn đường dẫn ảnh** - Linh hoạt theo nhu cầu
+            - ✅ **PWA Ready** - Cài đặt như app native
+            
+            ### Tính năng cơ bản:
             - ✅ Chuyển đổi PDF sang Markdown
             - ✅ Chuyển đổi Word (.docx) sang Markdown
             - ✅ Trích xuất và lưu hình ảnh
-            - ✅ **Nhận diện bảng bằng OCR** (tự động phát hiện và chuyển đổi bảng từ ảnh)
             - ✅ Giữ nguyên định dạng cơ bản (tiêu đề, in đậm, in nghiêng)
             - ✅ Hỗ trợ bảng (từ Word)
             - ✅ Preview trực tiếp
