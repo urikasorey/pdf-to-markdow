@@ -11,6 +11,81 @@ import os
 from pathlib import Path
 import base64
 import re
+import cv2
+import numpy as np
+import pandas as pd
+try:
+    import pytesseract
+    # Streamlit Cloud sẽ cài Tesseract tự động
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+def detect_table_in_image(image_path):
+    """Phát hiện và trích xuất bảng từ hình ảnh bằng OCR"""
+    if not TESSERACT_AVAILABLE:
+        return None
+    
+    try:
+        # Đọc ảnh
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        
+        # Chuyển sang grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Áp dụng threshold để làm nổi bật đường viền
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        
+        # Phát hiện đường ngang và dọc (đặc trưng của bảng)
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        
+        horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        
+        # Kết hợp đường ngang và dọc
+        table_mask = cv2.add(horizontal_lines, vertical_lines)
+        
+        # Nếu phát hiện đủ nhiều đường => có thể là bảng
+        if cv2.countNonZero(table_mask) > 100:
+            # Sử dụng OCR để đọc text
+            ocr_data = pytesseract.image_to_string(img)
+            
+            # Thử parse thành bảng
+            lines = [line.strip() for line in ocr_data.split('\n') if line.strip()]
+            if len(lines) >= 2:  # Ít nhất có header và 1 row
+                # Tạo bảng Markdown
+                return lines
+        
+        return None
+    except Exception as e:
+        return None
+
+def lines_to_markdown_table(lines):
+    """Chuyển đổi danh sách dòng thành bảng Markdown"""
+    if not lines or len(lines) < 2:
+        return None
+    
+    markdown_table = ""
+    
+    # Header
+    header_parts = [p.strip() for p in lines[0].split() if p.strip()]
+    if len(header_parts) > 0:
+        markdown_table += "| " + " | ".join(header_parts) + " |\n"
+        markdown_table += "| " + " | ".join(["---"] * len(header_parts)) + " |\n"
+        
+        # Rows
+        for line in lines[1:]:
+            row_parts = [p.strip() for p in line.split() if p.strip()]
+            if len(row_parts) > 0:
+                # Đảm bảo số cột bằng header
+                while len(row_parts) < len(header_parts):
+                    row_parts.append("")
+                markdown_table += "| " + " | ".join(row_parts[:len(header_parts)]) + " |\n"
+    
+    return markdown_table if markdown_table else None
 
 def extract_images_from_pdf(pdf_path, output_folder):
     """Trích xuất hình ảnh từ PDF"""
@@ -34,10 +109,15 @@ def extract_images_from_pdf(pdf_path, output_folder):
             with open(image_path, "wb") as img_file:
                 img_file.write(image_bytes)
             
+            # Thử phát hiện bảng trong ảnh
+            table_data = detect_table_in_image(image_path)
+            
             images.append({
                 'page': page_num,
                 'path': image_path,
-                'name': image_name
+                'name': image_name,
+                'is_table': table_data is not None,
+                'table_data': table_data
             })
     
     doc.close()
@@ -77,7 +157,15 @@ def pdf_to_markdown(pdf_path, output_folder):
         # Thêm hình ảnh từ trang này
         page_images = [img for img in images if img['page'] == page_num]
         for img in page_images:
-            markdown_content += f"![Image]({img['name']})\n\n"
+            # Nếu ảnh là bảng, hiển thị bảng thay vì ảnh
+            if img.get('is_table') and img.get('table_data'):
+                table_md = lines_to_markdown_table(img['table_data'])
+                if table_md:
+                    markdown_content += f"\n**📊 Bảng (OCR):**\n\n{table_md}\n\n"
+                else:
+                    markdown_content += f"![Image]({img['name']})\n\n"
+            else:
+                markdown_content += f"![Image]({img['name']})\n\n"
         
         # Phân cách trang
         if page_num < len(doc) - 1:
@@ -185,6 +273,12 @@ def main():
     
     st.title("📝 Chuyển đổi PDF/Word sang Markdown")
     st.write("Upload file PDF hoặc Word để chuyển đổi sang định dạng Markdown (bao gồm cả hình ảnh)")
+    
+    # Hiển thị trạng thái OCR
+    if TESSERACT_AVAILABLE:
+        st.success("✅ OCR đã được kích hoạt - Có thể nhận diện bảng từ hình ảnh!")
+    else:
+        st.warning("⚠️ OCR chưa khả dụng - Bảng sẽ hiển thị dưới dạng hình ảnh")
     
     # Upload file
     uploaded_file = st.file_uploader("Chọn file PDF hoặc Word", type=['pdf', 'docx'])
@@ -295,6 +389,7 @@ def main():
             - ✅ Chuyển đổi PDF sang Markdown
             - ✅ Chuyển đổi Word (.docx) sang Markdown
             - ✅ Trích xuất và lưu hình ảnh
+            - ✅ **Nhận diện bảng bằng OCR** (tự động phát hiện và chuyển đổi bảng từ ảnh)
             - ✅ Giữ nguyên định dạng cơ bản (tiêu đề, in đậm, in nghiêng)
             - ✅ Hỗ trợ bảng (từ Word)
             - ✅ Preview trực tiếp
