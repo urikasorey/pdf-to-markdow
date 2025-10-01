@@ -520,7 +520,25 @@ def main():
                                         f"![Image]({img_file})",
                                         f'<img src="data:image/{img_ext};base64,{img_data}" alt="{img_file}" style="max-width:100%; height:auto;"/>'
                                     )
-                        st.markdown(preview_content, unsafe_allow_html=True)
+                        
+                        # Hiển thị trong container có scroll
+                        st.markdown(
+                            f"""
+                            <div style="
+                                height: 400px; 
+                                overflow-y: auto; 
+                                overflow-x: auto;
+                                border: 1px solid #ddd; 
+                                border-radius: 5px; 
+                                padding: 15px;
+                                background-color: #f8f9fa;
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                            ">
+                                {preview_content}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
                     
                     # Hiển thị hình ảnh đã trích xuất
                     if os.path.exists(result['images_dir']):
