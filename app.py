@@ -236,11 +236,26 @@ def main():
                     
                     with col2:
                         st.subheader("👁️ Preview Markdown")
-                        st.markdown(markdown_content)
+                        # Thay thế đường dẫn ảnh để hiển thị trong Streamlit
+                        preview_content = markdown_content
+                        if os.path.exists(images_dir):
+                            image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+                            for img_file in image_files:
+                                img_path = os.path.join(images_dir, img_file)
+                                # Đọc ảnh và convert sang base64 để hiển thị inline
+                                with open(img_path, "rb") as img_f:
+                                    img_data = base64.b64encode(img_f.read()).decode()
+                                    img_ext = img_file.split('.')[-1]
+                                    # Thay thế đường dẫn ảnh bằng data URI
+                                    preview_content = preview_content.replace(
+                                        f"![Image]({img_file})",
+                                        f'<img src="data:image/{img_ext};base64,{img_data}" alt="{img_file}" style="max-width:100%; height:auto;"/>'
+                                    )
+                        st.markdown(preview_content, unsafe_allow_html=True)
                     
                     # Hiển thị hình ảnh đã trích xuất
                     if os.path.exists(images_dir):
-                        image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+                        image_files = [f for f in os.listdir(images_dir) if f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
                         if image_files:
                             st.subheader(f"🖼️ Hình ảnh đã trích xuất ({len(image_files)} ảnh)")
                             
