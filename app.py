@@ -108,6 +108,118 @@ def lines_to_markdown_table(lines):
     
     return markdown_table if markdown_table else None
 
+def markdown_to_latex(markdown_content):
+    """Chuyển đổi Markdown sang LaTeX"""
+    latex_content = markdown_content
+    
+    # Thay thế headers
+    latex_content = re.sub(r'^# (.+)$', r'\\section{\1}', latex_content, flags=re.MULTILINE)
+    latex_content = re.sub(r'^## (.+)$', r'\\subsection{\1}', latex_content, flags=re.MULTILINE)
+    latex_content = re.sub(r'^### (.+)$', r'\\subsubsection{\1}', latex_content, flags=re.MULTILINE)
+    latex_content = re.sub(r'^#### (.+)$', r'\\paragraph{\1}', latex_content, flags=re.MULTILINE)
+    
+    # Thay thế bold và italic
+    latex_content = re.sub(r'\*\*(.+?)\*\*', r'\\textbf{\1}', latex_content)
+    latex_content = re.sub(r'\*(.+?)\*', r'\\textit{\1}', latex_content)
+    
+    # Thay thế hình ảnh
+    latex_content = re.sub(
+        r'!\[([^\]]*)\]\(([^\)]+)\)',
+        r'\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.8\\textwidth]{\2}\n\\caption{\1}\n\\end{figure}',
+        latex_content
+    )
+    
+    # Thay thế bảng Markdown sang LaTeX
+    lines = latex_content.split('\n')
+    new_lines = []
+    in_table = False
+    table_lines = []
+    
+    for line in lines:
+        if '|' in line and not in_table:
+            in_table = True
+            table_lines = [line]
+        elif in_table:
+            if '|' in line:
+                table_lines.append(line)
+            else:
+                # Kết thúc bảng, convert sang LaTeX
+                latex_table = convert_markdown_table_to_latex(table_lines)
+                new_lines.append(latex_table)
+                new_lines.append(line)
+                in_table = False
+                table_lines = []
+        else:
+            new_lines.append(line)
+    
+    if in_table and table_lines:
+        latex_table = convert_markdown_table_to_latex(table_lines)
+        new_lines.append(latex_table)
+    
+    latex_content = '\n'.join(new_lines)
+    
+    # Thay thế horizontal rule
+    latex_content = re.sub(r'^---+$', r'\\hrulefill', latex_content, flags=re.MULTILINE)
+    
+    # Tạo document LaTeX hoàn chỉnh
+    full_latex = f"""\\documentclass[12pt,a4paper]{{article}}
+\\usepackage[utf8]{{inputenc}}
+\\usepackage[vietnamese]{{babel}}
+\\usepackage{{graphicx}}
+\\usepackage{{amsmath}}
+\\usepackage{{hyperref}}
+\\usepackage{{booktabs}}
+\\usepackage{{longtable}}
+
+\\title{{Converted Document}}
+\\author{{PDF to Markdown Converter}}
+\\date{{\\today}}
+
+\\begin{{document}}
+
+\\maketitle
+
+{latex_content}
+
+\\end{{document}}
+"""
+    
+    return full_latex
+
+def convert_markdown_table_to_latex(table_lines):
+    """Chuyển đổi bảng Markdown sang LaTeX"""
+    if len(table_lines) < 2:
+        return ""
+    
+    # Parse header
+    header = [cell.strip() for cell in table_lines[0].split('|') if cell.strip()]
+    num_cols = len(header)
+    
+    # Bỏ qua dòng separator (---)
+    data_lines = [line for line in table_lines[2:] if '|' in line]
+    
+    # Tạo LaTeX table
+    latex_table = f"""
+\\begin{{table}}[h]
+\\centering
+\\begin{{tabular}}{{{'l' * num_cols}}}
+\\toprule
+{' & '.join(header)} \\\\
+\\midrule
+"""
+    
+    for line in data_lines:
+        cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+        if len(cells) == num_cols:
+            latex_table += ' & '.join(cells) + ' \\\\\n'
+    
+    latex_table += """\\bottomrule
+\\end{tabular}
+\\end{table}
+"""
+    
+    return latex_table
+
 def extract_images_from_pdf(pdf_path, output_folder, optimize_imgs=True, enable_ocr=True, ocr_lang='vie+eng'):
     """Trích xuất hình ảnh từ PDF"""
     doc = fitz.open(pdf_path)
@@ -363,7 +475,7 @@ def main():
         st.subheader("📦 Export")
         export_format = st.multiselect(
             "Format xuất file",
-            ["Markdown (.md)", "ZIP (MD + Images)", "HTML"],
+            ["Markdown (.md)", "ZIP (MD + Images)", "HTML", "LaTeX (.tex)"],
             default=["Markdown (.md)", "ZIP (MD + Images)"]
         )
     
@@ -454,6 +566,16 @@ def main():
                                 data=result['markdown'],
                                 file_name=f"{Path(result['filename']).stem}.md",
                                 mime="text/markdown"
+                            )
+                        
+                        # Nút download LaTeX
+                        if "LaTeX (.tex)" in export_format:
+                            latex_content = markdown_to_latex(result['markdown'])
+                            st.download_button(
+                                label="📐 Tải xuống LaTeX",
+                                data=latex_content,
+                                file_name=f"{Path(result['filename']).stem}.tex",
+                                mime="application/x-tex"
                             )
                     
                         
@@ -575,7 +697,7 @@ def main():
                                     st.metric(key.capitalize(), value)
                             
                             # Download buttons
-                            cols = st.columns(3)
+                            cols = st.columns(4)
                             with cols[0]:
                                 if "Markdown (.md)" in export_format:
                                     st.download_button(
@@ -608,6 +730,16 @@ def main():
                                         file_name=f"{Path(result['filename']).stem}.html",
                                         mime="text/html",
                                         key=f"html_{idx}"
+                                    )
+                            with cols[3]:
+                                if "LaTeX (.tex)" in export_format:
+                                    latex_content = markdown_to_latex(result['markdown'])
+                                    st.download_button(
+                                        label="📐 LaTeX",
+                                        data=latex_content,
+                                        file_name=f"{Path(result['filename']).stem}.tex",
+                                        mime="application/x-tex",
+                                        key=f"latex_{idx}"
                                     )
                     
                     # Download tất cả thành 1 ZIP lớn
@@ -654,6 +786,7 @@ def main():
             - ✅ **Tối ưu hình ảnh** - Giảm kích thước file
             - ✅ **Tải xuống ZIP** - Gộp markdown + images
             - ✅ **Export HTML** - Xuất sang định dạng HTML
+            - ✅ **Export LaTeX** - Xuất sang LaTeX cho tài liệu học thuật
             - ✅ **Thống kê file** - Số trang, ảnh, bảng
             - ✅ **Tùy chọn đường dẫn ảnh** - Linh hoạt theo nhu cầu
             - ✅ **PWA Ready** - Cài đặt như app native
